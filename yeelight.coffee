@@ -30,6 +30,7 @@ module.exports = (env) ->
       @requestCounter = 0
       @requests = {}
       @propertyNames = ["power", "bright", "ct", "rgb", "hue", "sat", "color_mode", "flowing", "delayoff", "flow_params", "music_on", "name"]
+      @booleanPropertyNames = ["power", "flowing", "music_on"]
       @propertyMappings = {
         power: "state"
         bright: "dimlevel"
@@ -39,7 +40,7 @@ module.exports = (env) ->
         sat: "saturation"
         color_mode: "colorMode"
         flowing: "flowing"
-        delayoff: "delayoff"
+        delayoff: "delayOff"
         flow_params: "flowParams"
         music_on: "musicOn"
         name: "name"
@@ -53,25 +54,16 @@ module.exports = (env) ->
       @sendRequest "get_prop", @propertyNames, (jsonData) =>
         for propertyName, index in @propertyNames
           propertyValue = jsonData.result[index]
-          mappedPropertyName = @propertyMappings[propertyName]
-          parsedPropertyValue = parseInt(propertyValue)
-          if isNaN(parsedPropertyValue)
-            if propertyValue is "on"
-              parsedPropertyValue = true
-            else if propertyValue is "off"
-              parsedPropertyValue = false
-            else
-              parsedPropertyValue = propertyValue
-          @propertyValues[mappedPropertyName] = parsedPropertyValue
+          @setPropertyValue propertyName, propertyValue
 
         env.logger.debug("PropertyValues: #{JSON.stringify(@propertyValues, null, 2)}")
 
-        if @propertyValues.state
-          dimLevel = 0
+        if not @propertyValues.state
+          dimlevel = 0
         else
-          dimLevel = @propertyValues.dimLevel
-        env.logger.debug("Dim level: #{dimLevel}")
-        @_setDimlevel dimLevel
+          dimlevel = @propertyValues.dimlevel
+        env.logger.debug("Dim level: #{dimlevel}")
+        @_setDimlevel dimlevel
 
 
     initConnection: () =>
@@ -123,27 +115,42 @@ module.exports = (env) ->
           delete @requests[jsonData.id]
       else
         # handle message with no id
-        if jsonData.method == "props" && jsonData.params?
+        if jsonData.method == "props" and jsonData.params?
            @handlePropsParams(jsonData.params)
         else
            env.logger.warn("Method is '#{jsonData.method}'. Ignore message.")
 
+    setPropertyValue: (propertyName, propertyValue) =>
+       mappedPropertyName = @propertyMappings[propertyName]
+       if propertyName in @booleanPropertyNames
+         if propertyValue in ["on", "true"] or propertyValue == 1
+           parsedPropertyValue = true
+         else
+           parsedPropertyValue = false
+       else
+         parsedPropertyValue = parseInt(propertyValue)
+
+       if isNaN(parsedPropertyValue)
+         parsedPropertyValue = propertyValue
+
+       @propertyValues[mappedPropertyName] = parsedPropertyValue
+
+       # Emit new values to the framework
+       if mappedPropertyName not in ['state', 'dimlevel']
+         @emit mappedPropertyName, parsedPropertyValue
+
+
     handlePropsParams: (params) =>
       env.logger.debug("Handle props params: #{JSON.stringify(params, null, 2)}")
 
-      for key of params
-        propertyValue = params[key]
-        @propertyValues[key] = propertyValue
-        propertyName = @propertyMappings[key]
-        # Emit new value if present
-        if propertyName? and propertyName not in ['state', 'dimlevel']
-           env.logger.debug("Emit new value for #{propertyName}: #{propertyValue}.")
-           @emit propertyName propertyValue
+      for propertyName of params
+        propertyValue = params[propertyName]
+        @setPropertyValue propertyName, propertyValue
 
       if params.power?
-        @_setState(params.power == "on")
+        @_setState(@propertyValues.state)
       if params.bright?
-        @_setDimlevel(params.bright)
+        @_setDimlevel(@propertyValues.dimlevel)
 
     sendRequest: (method, params, responseHandler) =>
       if not @connection?
@@ -220,20 +227,20 @@ module.exports = (env) ->
         description: "1: rgb mode / 2: color temperature mode / 3: hsv mode"
         type: "number"
       flowing:
-        description: "0: no flow is running / 1:color flow is running"
-        type: "number"
+        description: "If color flow is running"
+        type: "boolean"
       delayOff:
         description: "The remaining time of a sleep timer. Range 1 ~ 60 (minutes)"
         type: "number"
         unit: "m"
       flowParams:
-        description: "Current flow parameters (only meaningful when 'flowing' is 1)"
+        description: "Current flow parameters (only meaningful when flowing is 1)"
         type: "string"
       musicOn:
-        description: "1: Music mode is on / 0: Music mode is off"
-        type: "number"
+        description: "If Music mode is on"
+        type: "boolean"
       name:
-        description: "The name of the device set by 'set_name' command"
+        description: "The name of the device set by set_name command"
         type: "string"
 
     getColorTemperature: () => Promise.resolve(@propertyValues.colorTemperature)
