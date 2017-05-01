@@ -136,7 +136,7 @@ module.exports = (env) ->
         @propertyValues[key] = propertyValue
         propertyName = @propertyMappings[key]
         # Emit new value if present
-        if propertyName? and propertyName not in ['state', dimlevel']
+        if propertyName? and propertyName not in ['state', 'dimlevel']
            env.logger.debug("Emit new value for #{propertyName}: #{propertyValue}.")
            @emit propertyName propertyValue
 
