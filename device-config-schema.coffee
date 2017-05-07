@@ -3,6 +3,7 @@ module.exports ={
   YeelightBulb:
     title: "YeelightBulb config options"
     type: "object"
+    extensions: ["xLink", "xAttributeOptions"]
     properties:
       address:
         description: "IP address of the light bulb"

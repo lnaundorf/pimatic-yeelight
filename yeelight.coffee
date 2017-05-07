@@ -29,41 +29,29 @@ module.exports = (env) ->
 
       @requestCounter = 0
       @requests = {}
-      @propertyNames = ["power", "bright", "ct", "rgb", "hue", "sat", "color_mode", "flowing", "delayoff", "flow_params", "music_on", "name"]
-      @booleanPropertyNames = ["power", "flowing", "music_on"]
-      @propertyMappings = {
-        power: "state"
-        bright: "dimlevel"
-        ct: "colorTemperature"
-        rgb: "color"
-        hue: "hue"
-        sat: "saturation"
-        color_mode: "colorMode"
-        flowing: "flowing"
-        delayoff: "delayOff"
-        flow_params: "flowParams"
-        music_on: "musicOn"
-        name: "name"
-      }
+      @propertyNames = ["power", "bright", "ct", "rgb", "hue", "sat", "color_mode"]#, "flowing", "delayoff", "flow_params", "music_on", "name"]
+      @booleanPropertyNames = ["power"]#, "flowing", "music_on"]
       @propertyValues = {}
 
       @initConnection()
       super()
 
     loadPropertyValues: () =>
-      @sendRequest "get_prop", @propertyNames, (jsonData) =>
+      @sendRequest "get_prop", @propertyNames
+      .then (jsonData) =>
         for propertyName, index in @propertyNames
           propertyValue = jsonData.result[index]
           @setPropertyValue propertyName, propertyValue
 
         env.logger.debug("PropertyValues: #{JSON.stringify(@propertyValues, null, 2)}")
 
-        if not @propertyValues.state
+        if not @propertyValues.power
           dimlevel = 0
         else
-          dimlevel = @propertyValues.dimlevel
+          dimlevel = @propertyValues.bright
         env.logger.debug("Dim level: #{dimlevel}")
         @_setDimlevel dimlevel
+        @updateRGBValues()
 
 
     initConnection: () =>
@@ -121,7 +109,6 @@ module.exports = (env) ->
            env.logger.warn("Method is '#{jsonData.method}'. Ignore message.")
 
     setPropertyValue: (propertyName, propertyValue) =>
-       mappedPropertyName = @propertyMappings[propertyName]
        if propertyName in @booleanPropertyNames
          if propertyValue in ["on", "true"] or propertyValue == 1
            parsedPropertyValue = true
@@ -133,40 +120,142 @@ module.exports = (env) ->
        if isNaN(parsedPropertyValue)
          parsedPropertyValue = propertyValue
 
-       @propertyValues[mappedPropertyName] = parsedPropertyValue
-
-       # Emit new values to the framework
-       if mappedPropertyName not in ['state', 'dimlevel']
-         @emit mappedPropertyName, parsedPropertyValue
-
+       @propertyValues[propertyName] = parsedPropertyValue
 
     handlePropsParams: (params) =>
       env.logger.debug("Handle props params: #{JSON.stringify(params, null, 2)}")
 
+      updateRGBValues = false
+
       for propertyName of params
+        if propertyName in ['ct', 'rgb', 'hue', 'sat', 'color_mode']
+          updateRGBValues = true
+
         propertyValue = params[propertyName]
         @setPropertyValue propertyName, propertyValue
 
-      if params.power?
-        @_setState(@propertyValues.state)
-      if params.bright?
-        @_setDimlevel(@propertyValues.dimlevel)
+      if params.power is "off"
+        env.logger.debug("@_setDimlevel -> 0")
+        @_setDimlevel 0
+      else if params.power? or params.bright?
+        env.logger.debug("@_setDimlevel -> #{@propertyValues.bright}")
+        @_setDimlevel @propertyValues.bright
 
-    sendRequest: (method, params, responseHandler) =>
+      env.logger.debug("PropertyValues: #{JSON.stringify(@propertyValues, null, 2)}")
+      if updateRGBValues
+        @updateRGBValues()
+
+    updateRGBValues: () =>
+      colorMode = @propertyValues.color_mode
+      if colorMode == 1
+        # rgb mode
+        colorValue = @propertyValues.rgb
+        env.logger.debug("Update from rgb value: #{colorValue}")
+        @blue = colorValue % 255
+        colorValue = Math.floor(colorValue / 255)
+        @green = colorValue % 255
+        @red = Math.floor(colorValue / 255)
+      else if colorMode == 2
+        # color temperature mode
+        rgbValues = @colorTemperatureToRGB @propertyValues.ct
+        env.logger.debug("Update from color temperature: #{@propertyValues.ct} -> #{JSON.stringify(rgbValues, null, 2)}")
+        @red = Math.round(rgbValues.r)
+        @green = Math.round(rgbValues.g)
+        @blue = Math.round(rgbValues.b)
+      else if colorMode == 3
+        # hsv mode
+        rgbValues = @hslToRgb @propertyValues.hue / 360.0, @propertyValues.sat / 100.0, @propertyValues.bright / 100.0
+        env.logger.debug("Update from hsv mode: #{@propertyValues.hue}, #{@propertyValues.sat} -> #{JSON.stringify(rgbValues, null, 2)}")
+        @red = Math.round(rgbValues.r)
+        @green = Math.round(rgbValues.g)
+        @blue = Math.round(rgbValues.b)
+      else
+        env.logger.error("Unknown color mode: #{colorMode}")
+        return
+
+      @emit "red", @red
+      @emit "green", @green
+      @emit "blue", @blue
+
+    # From http://www.tannerhelland.com/4435/convert-temperature-rgb-algorithm-code/
+    colorTemperatureToRGB: (kelvin) =>
+      temp = kelvin / 100
+      if temp <= 66
+        red = 255
+        green = temp
+        green = 99.4708025861 * Math.log(green) - 161.1195681661
+
+        if temp <= 19
+          blue = 0
+        else
+          blue = temp - 10
+          blue = 138.5177312231 * Math.log(blue) - 305.0447927307
+      else
+        red = temp - 60
+        red = 329.698727446 * Math.pow(red, -0.1332047592)
+
+        green = temp - 60
+        green = 288.1221695283 * Math.pow(green, -0.0755148492 )
+
+        blue = 255
+
+
+      return {
+        r: @clamp(red,   0, 255)
+        g: @clamp(green, 0, 255)
+        b: @clamp(blue,  0, 255)
+      }
+
+    clamp: (x, min, max) =>
+      if x< min
+        return min
+      if x > max
+        return max
+
+      return x;
+
+    # From http://stackoverflow.com/questions/2353211/hsl-to-rgb-color-conversion/9493060#9493060
+    hslToRgb: (h, s, l) =>
+      env.logger.debug("Hue: #{h}, sat: #{s}, l: #{l}")
+      if s == 0
+        r = g = b = l #achromatic
+      else
+        hue2rgb = (p, q, t) ->
+            if t < 0
+              t += 1
+            if t > 1
+              t -= 1
+            if t < 1/6
+              return p + (q - p) * 6 * t
+            if t < 1/2
+              return q
+            if t < 2/3
+              return p + (q - p) * (2/3 - t) * 6
+            return p
+
+        q = if l < 0.5 then l * (1 + s) else l + s - l * s
+        p = 2 * l - q
+
+        r = hue2rgb(p, q, h + 1/3)
+        g = hue2rgb(p, q, h)
+        b = hue2rgb(p, q, h - 1/3)
+
+      return {
+        r: Math.round(r * 255)
+        g: Math.round(g * 255)
+        b: Math.round(b * 255)
+      }
+
+    sendRequest: (method, params) =>
       if not @connection?
-        env.logger.error("Socket not initialized for #{@address}.")
-        return
+        return Promise.reject("Socket not initialized for #{@address}.")
       else if @connection.connecting
-        env.logger.error("The socket for #{@address} is still connecting.")
-        return
+        return Promise.reject("The socket for #{@address} is still connecting.")
       else if @connection.destroyed
-        env.logger.error("The socket for #{@address} is destroyed.")
-        return
+        return Promise.reject("The socket for #{@address} is destroyed.")
 
       id = @requestCounter++
 
-      if responseHandler?
-        @requests[id] = responseHandler
       request = {
         id: id
         method: method
@@ -175,6 +264,22 @@ module.exports = (env) ->
       jsonString = JSON.stringify(request)
       env.logger.debug("Sending request: #{jsonString}")
       @connection.write(jsonString + "\r\n")
+      prom = new Promise((accept, reject) =>
+        respond = false;
+        timeout = setTimeout(() =>
+          if not respond
+            reject("Timeout")
+        , 3000)
+        @requests[id] = (res) =>
+          if respond
+            return
+          respond = true
+          error = res.error
+          if error
+            return reject(error)
+          accept(res)
+      )
+      return prom
 
     changeDimlevelTo: (state) =>
       env.logger.debug("Current state: #{@_state}")
@@ -182,23 +287,26 @@ module.exports = (env) ->
       if not @_state
         if state > 0
           # Turn on sudden and then set dimmer level accordingly
-          @sendRequest "set_power", ["on", "sudden", 1], (jsonData) =>
-            env.logger.debug("set_power on, response: #{JSON.stringify(jsonData, null, 2)}")
+          prom = @sendRequest "set_power", ["on", "sudden", 1]
+          .then (response) =>
             @sendRequest "set_bright", @getValueArray(state)
+          return prom
         else
           # Do nothing
+          return Promise.resolve()
       else if state == 0
          # Turn off
-         @sendRequest "set_power", @getValueArray("off")
+         return @sendRequest "set_power", @getValueArray("off")
       else
          #set State
-         @sendRequest "set_bright", @getValueArray(state)
+         return @sendRequest "set_bright", @getValueArray(state)
             
-    getValueArray: (value) =>
+    getValueArray: (args) =>
+      argsArray = Array.prototype.slice.call(arguments)
       if @smoothDuration < 30
-        return [value, "sudden", 1]
+        return  argsArray.concat ["sudden", 1]
       else
-         return [value, "smooth", @smoothDuration] 
+         return argsArray.concat ["smooth", @smoothDuration]
           
 
     attributes:
@@ -210,57 +318,69 @@ module.exports = (env) ->
         description: "the current state of the switch"
         type: "boolean"
         labels: ['on', 'off']
-      colorTemperature:
-        description: "Color temperature. Range 1700 ~ 6500(k)"
+      red:
+        description: "the red value of the lightbulb"
         type: "number"
-        unit: "K"
-      color:
-        description: "Color. Range 1 ~ 16777215"
+      green:
+        description: "the green value of the lightbulb"
         type: "number"
-      hue:
-        description: "Hue. Range 0 ~ 359"
+      blue:
+        description: "the blue value of the lightbulb"
         type: "number"
-      saturation:
-        description: "Saturation. Range 0 ~ 100"
-        type: "number"
-      colorMode:
-        description: "1: rgb mode / 2: color temperature mode / 3: hsv mode"
-        type: "number"
-      flowing:
-        description: "If color flow is running"
-        type: "boolean"
-      delayOff:
-        description: "The remaining time of a sleep timer. Range 1 ~ 60 (minutes)"
-        type: "number"
-        unit: "m"
-      flowParams:
-        description: "Current flow parameters (only meaningful when flowing is 1)"
-        type: "string"
-      musicOn:
-        description: "If Music mode is on"
-        type: "boolean"
-      name:
-        description: "The name of the device set by set_name command"
-        type: "string"
 
-    getColorTemperature: () => Promise.resolve(@propertyValues.colorTemperature)
+    getRed: () => Promise.resolve(@red)
 
-    getColor: () => Promise.resolve(@propertyValues.color)
+    getGreen: () => Promise.resolve(@green)
 
-    getHue: () => Promise.resolve(@propertyValues.hue)
+    getBlue: () => Promise.resolve(@blue)
 
-    getSaturation: () => Promise.resolve(@propertyValues.saturation)
+    actions:
+      changeDimlevelTo:
+        description: "sets the level of the dimmer"
+        params:
+          dimlevel:
+            type: "number"
+      changeStateTo:
+        description: "changes the switch to on or off"
+        params:
+          state:
+            type: "boolean"
+      turnOn:
+        description: "turns the dim level to 100%"
+      turnOff:
+        description: "turns the dim level to 0%"
+      setColorTemperature:
+        description: "Set the color temperature of the lightbulb"
+        params:
+          colorTemperature:
+            type: "number"
+      setColorRGB:
+        descriptions: "Set the rgb color of the lightbulb"
+        params:
+          red:
+            type: "number"
+          green:
+            type: "number"
+          blue:
+            type: "number"
+      setColorHSV:
+        description: "Set the hsv color of the lightbulb"
+        params:
+          hue:
+            type: "number"
+          sat:
+            type: "number"
 
-    getColorMode: () => Promise.resolve(@propertyValues.colorMode)
+    setColorTemperature: (temp) =>
+      colorTemperature = Math.min(Math.max(1700, temp), 6500)
+      return @sendRequest "set_ct_abx", @getValueArray(colorTemperature)
 
-    getFlowing: () => Promise.resolve(@propertyValues.flowing)
+    setColorRGB: (r, g, b) =>
+      env.logger.debug("Set rgb color, red: #{r}, green: #{g}, blue: #{b}")
+      colorValue = r * 255 * 255 + g * 255 + b
+      return @sendRequest "set_rgb", @getValueArray(colorValue)
 
-    getDelayOff: () => Promise.resolve(@propertyValues.delayOff)
-
-    getFlowParams: () => Promise.resolve(@propertyValues.flowParams)
-
-    getMusicOn: () => Promise.resolve(@propertyValues.musicOn)
-
-    getName: () => Promise.resolve(@propertyValues.name)
-
+    setColorHSV: (hue, sat) =>
+      env.logger.debug("Set hsv color, hue: #{hue}, sat: #{sat}")
+      return @sendRequest "set_hsv", @getValueArray(hue, sat)
   return new YeelightPlugin
